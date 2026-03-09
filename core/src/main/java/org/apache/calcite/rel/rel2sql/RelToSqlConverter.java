@@ -54,11 +54,14 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeField;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexCorrelVariable;
+import org.apache.calcite.rex.RexFieldAccess;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexLocalRef;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.rex.RexProgram;
+import org.apache.calcite.rex.RexSubQuery;
 import org.apache.calcite.sql.JoinConditionType;
 import org.apache.calcite.sql.JoinType;
 import org.apache.calcite.sql.SqlAsofJoin;
@@ -557,6 +560,7 @@ public class RelToSqlConverter extends SqlImplementor
           visitInput(e, 0, isAnon(), ignoreClauses,
               ImmutableSet.of(Clause.HAVING));
       parseCorrelTable(e, x);
+      parseCorrelVariables(e.getCondition());
       final Builder builder = x.builder(e);
       x.asSelect().setHaving(
           SqlUtil.andExpressions(x.asSelect().getHaving(),
@@ -569,6 +573,7 @@ public class RelToSqlConverter extends SqlImplementor
       }
       parseCorrelTable(e, x);
       final Builder builder = x.builder(e);
+      parseCorrelVariables(e.getCondition());
       if (input instanceof Join) {
         final Context context = x.qualifiedContext();
         if (selectListRequired(context)) {
@@ -602,6 +607,31 @@ public class RelToSqlConverter extends SqlImplementor
       }
     }
     return false;
+  }
+
+  private void parseCorrelVariables(RexNode rexNode) {
+    if (rexNode instanceof RexCorrelVariable) {
+      final RexCorrelVariable correl = (RexCorrelVariable) rexNode;
+      correlTableMap.putIfAbsent(
+          correl.id,
+          aliasContext(ImmutableMap.of(correl.id.getName(), correl.getType()), true));
+      return;
+    }
+    if (rexNode instanceof RexSubQuery) {
+      for (RexNode operand : ((RexSubQuery) rexNode).operands) {
+        parseCorrelVariables(operand);
+      }
+      return;
+    }
+    if (rexNode instanceof RexFieldAccess) {
+      parseCorrelVariables(((RexFieldAccess) rexNode).getReferenceExpr());
+      return;
+    }
+    if (rexNode instanceof RexCall) {
+      for (RexNode operand : ((RexCall) rexNode).operands) {
+        parseCorrelVariables(operand);
+      }
+    }
   }
 
   /**
@@ -772,6 +802,7 @@ public class RelToSqlConverter extends SqlImplementor
     // "select a, b, sum(x) from ( ... ) group by a, b"
     final boolean ignoreClauses = e.getInput() instanceof Project;
     final Result x = visitInput(e, 0, isAnon(), ignoreClauses, clauseSet);
+    parseCorrelTable(e, x);
     final Builder builder = x.builder(e);
     final List<SqlNode> selectList = new ArrayList<>();
     final List<SqlNode> groupByList =
