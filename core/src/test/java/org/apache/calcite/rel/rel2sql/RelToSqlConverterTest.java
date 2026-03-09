@@ -11907,8 +11907,8 @@ class RelToSqlConverterTest {
         + "  FROM \"foodmart\".\"product\" p4\n"
         + ")";
 
-    final RuleSet rules = RuleSets.ofList(
-        CoreRules.FILTER_SUB_QUERY_TO_CORRELATE,
+    final RuleSet rules =
+        RuleSets.ofList(CoreRules.FILTER_SUB_QUERY_TO_CORRELATE,
         CoreRules.PROJECT_SUB_QUERY_TO_CORRELATE,
         CoreRules.JOIN_SUB_QUERY_TO_CORRELATE,
         CoreRules.FILTER_SUB_QUERY_TO_MARK_CORRELATE,
@@ -11924,7 +11924,8 @@ class RelToSqlConverterTest {
       sql(generated).withPostgresql().exec();
     } catch (Exception e) {
       throw new AssertionError(
-          "Generated SQL failed PostgreSQL round-trip validation:\n" + generated,
+          "Generated SQL failed PostgreSQL round-trip validation:\n"
+              + generated,
           e);
     }
   }
