@@ -889,12 +889,20 @@ public class RelToSqlConverter extends SqlImplementor
         + aggregate.getGroupSet() + ", just possibly a different order";
 
     final List<SqlNode> groupKeys = new ArrayList<>();
+    final Join aggregateJoinInput =
+        aggregate.getInput() instanceof Join ? (Join) aggregate.getInput() : null;
+    final SqlJoin fromJoin =
+        builder.select.getFrom() instanceof SqlJoin ? (SqlJoin) builder.select.getFrom() : null;
+    final int leftFieldCount = aggregateJoinInput == null
+        ? -1
+        : aggregateJoinInput.getLeft().getRowType().getFieldCount();
     for (int key : groupList) {
-      final SqlNode field = builder.context.field(key);
+      SqlNode field = builder.context.field(key);
+      field = maybeQualifyJoinKey(field, key, fromJoin, leftFieldCount);
       groupKeys.add(field);
     }
     for (int key : sortedGroupList) {
-      final SqlNode field = builder.context.field(key);
+      SqlNode field = maybeQualifyJoinKey(builder.context.field(key), key, fromJoin, leftFieldCount);
       addSelect(selectList, field, aggregate.getRowType());
     }
     switch (aggregate.getGroupType()) {
@@ -934,6 +942,31 @@ public class RelToSqlConverter extends SqlImplementor
                       groupItem(groupKeys, groupSet, aggregate.getGroupSet()))
                   .collect(Collectors.toList())));
     }
+  }
+
+  private SqlNode maybeQualifyJoinKey(SqlNode field, int key,
+      @Nullable SqlJoin fromJoin, int leftFieldCount) {
+    if (!(field instanceof SqlIdentifier)
+        || ((SqlIdentifier) field).names.size() != 1
+        || fromJoin == null) {
+      return field;
+    }
+
+    final SqlNode side;
+    if (leftFieldCount < 0) {
+      if (key != 0) {
+        return field;
+      }
+      side = fromJoin.getLeft();
+    } else {
+      side = key < leftFieldCount ? fromJoin.getLeft() : fromJoin.getRight();
+    }
+    final String sideAlias = SqlValidatorUtil.alias(side);
+    if (sideAlias == null) {
+      return field;
+    }
+
+    return new SqlIdentifier(ImmutableList.of(sideAlias, ((SqlIdentifier) field).getSimple()), POS);
   }
 
   private static SqlNode groupItem(List<SqlNode> groupKeys,
