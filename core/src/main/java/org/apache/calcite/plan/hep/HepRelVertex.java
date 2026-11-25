@@ -26,7 +26,7 @@ import org.apache.calcite.rel.metadata.DelegatingMetadataRel;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
 import org.apache.calcite.rel.type.RelDataType;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 import java.util.List;
 
@@ -52,6 +52,7 @@ public class HepRelVertex extends AbstractRelNode implements DelegatingMetadataR
     super(rel.getCluster(), rel.getTraitSet());
     currentRel = requireNonNull(rel, "rel");
     checkArgument(!(rel instanceof HepRelVertex));
+    rowType = rel.getRowType();
   }
 
   //~ Methods ----------------------------------------------------------------
