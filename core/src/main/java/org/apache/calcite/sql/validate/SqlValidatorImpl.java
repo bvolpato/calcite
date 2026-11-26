@@ -694,18 +694,13 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
 
     for (String name : commonColumnNames) {
       if (matcher.matches(identifier.getSimple(), name)) {
-        final List<SqlNode> qualifiedNode = new ArrayList<>();
-        for (ScopeChild child : requireNonNull(scope, "scope").children) {
-          if (matcher.indexOf(child.namespace.getRowType().getFieldNames(), name) >= 0) {
-            final SqlIdentifier exp =
-                new SqlIdentifier(
-                    ImmutableList.of(child.name, name),
-                    identifier.getParserPosition());
-            qualifiedNode.add(exp);
-          }
-        }
-
-        assert qualifiedNode.size() == 2;
+        // Take the column from each input of this join, not from every table
+        // of the FROM clause; an input that is a NATURAL or USING join on the
+        // column gives one column, as in 'a JOIN b USING (x) JOIN c USING (x)'
+        final List<SqlNode> qualifiedNode =
+            ImmutableList.of(
+                joinInputColumn(join, true, name, identifier, scope),
+                joinInputColumn(join, false, name, identifier, scope));
 
         // COALESCE is only needed for FULL JOIN; for RIGHT JOIN use the right
         // column (always non-null), and for INNER/LEFT JOIN use the left column.
@@ -761,6 +756,46 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
     } else {
       return identifier;
     }
+  }
+
+  /** Returns the column {@code name} of an input of a join.
+   *
+   * @param join       Join whose left or right input has the column
+   * @param left       Whether to use the left input (true) or the right
+   *                   input (false); not the join type
+   * @param name       Column name
+   * @param identifier Identifier being expanded, for the parser position
+   * @param scope      Scope of the SELECT
+   */
+  private SqlNode joinInputColumn(SqlJoin join, boolean left, String name,
+      SqlIdentifier identifier, SelectScope scope) {
+    final SqlNode input = left ? join.getLeft() : join.getRight();
+    final SqlIdentifier id =
+        new SqlIdentifier(name, identifier.getParserPosition());
+    final List<ScopeChild> children;
+    if (input instanceof SqlJoin) {
+      // A NATURAL or USING join on the column gives one column
+      final SqlNode expanded =
+          expandExprFromJoin((SqlJoin) input, id, scope, false);
+      if (expanded != id) {
+        return expanded;
+      }
+      children = ((ListScope) getJoinScope(input)).children;
+    } else {
+      // The tables of the left input come first in the join's scope
+      final List<ScopeChild> joinChildren =
+          ((ListScope) getJoinScope(join)).children;
+      children =
+          ImmutableList.of(left ? joinChildren.get(0) : Util.last(joinChildren));
+    }
+    final SqlNameMatcher matcher = catalogReader.nameMatcher();
+    for (ScopeChild child : children) {
+      if (matcher.indexOf(child.namespace.getRowType().getFieldNames(), name) >= 0) {
+        return new SqlIdentifier(ImmutableList.of(child.name, name),
+            identifier.getParserPosition());
+      }
+    }
+    throw new AssertionError("column " + name + " not found in " + input);
   }
 
   private static void validateQualifiedCommonColumn(SqlJoin join,
@@ -2937,6 +2972,38 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
    */
   // CHECKSTYLE: OFF
   // CheckStyle thinks this method is too long
+  /**
+   * Creates a scope for a lateral table: the items to the left of it are
+   * visible, but the namespaces registered for the table itself (such as its
+   * alias) are not, because they are added after the snapshot is taken.
+   */
+  private TableScope createLateralTableScope(
+      SqlValidatorScope parentScope0,
+      @Nullable SqlValidatorScope usingScope,
+      SqlNode node) {
+    SqlValidatorScope s = usingScope;
+    while (s instanceof JoinScope) {
+      s = ((JoinScope) s).getUsingScope();
+    }
+    final SqlNode node2 = s != null ? s.getNode() : node;
+    final TableScope tableScope = new TableScope(parentScope0, node2);
+    // The items to the left of this one are visible, also those before an
+    // enclosing join, as "a" in "FROM a, LATERAL (...) CROSS JOIN b".
+    // JoinScope propagates each child to the enclosing JoinScope, so the
+    // outermost one holds all of them, in FROM-list order.
+    SqlValidatorScope outer = usingScope;
+    while (outer instanceof JoinScope
+        && ((JoinScope) outer).getUsingScope() instanceof JoinScope) {
+      outer = ((JoinScope) outer).getUsingScope();
+    }
+    if (outer instanceof ListScope) {
+      for (ScopeChild child : ((ListScope) outer).children) {
+        tableScope.addChild(child.namespace, child.name, child.nullable);
+      }
+    }
+    return tableScope;
+  }
+
   private SqlNode registerFrom(
       SqlValidatorScope parentScope0,
       SqlValidatorScope usingScope,
@@ -2997,27 +3064,7 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
 
     final SqlValidatorScope parentScope;
     if (lateral) {
-      SqlValidatorScope s = usingScope;
-      while (s instanceof JoinScope) {
-        s = ((JoinScope) s).getUsingScope();
-      }
-      final SqlNode node2 = s != null ? s.getNode() : node;
-      final TableScope tableScope = new TableScope(parentScope0, node2);
-      // The items to the left of this one are visible, also those before an
-      // enclosing join, as "a" in "FROM a, LATERAL (...) CROSS JOIN b".
-      // JoinScope propagates each child to the enclosing JoinScope, so the
-      // outermost one holds all of them, in FROM-list order.
-      SqlValidatorScope outer = usingScope;
-      while (outer instanceof JoinScope
-          && ((JoinScope) outer).getUsingScope() instanceof JoinScope) {
-        outer = ((JoinScope) outer).getUsingScope();
-      }
-      if (outer instanceof ListScope) {
-        for (ScopeChild child : ((ListScope) outer).children) {
-          tableScope.addChild(child.namespace, child.name, child.nullable);
-        }
-      }
-      parentScope = tableScope;
+      parentScope = createLateralTableScope(parentScope0, usingScope, node);
     } else {
       parentScope = parentScope0;
     }
@@ -3198,11 +3245,11 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
           extendList,
           forceNullable,
           true);
-      // Put the usingScope which is a JoinScope,
-      // in order to make visible the left items
-      // of the JOIN tree.
       sbc.setOperand(0, newOperand);
-      scopes.put(node, usingScope);
+      // Use a scope that contains only the items to the left of this one;
+      // the namespace registered for this lateral table itself (such as its
+      // alias) must not be visible when resolving its arguments.
+      scopes.put(node, createLateralTableScope(parentScope, usingScope, node));
       return sbc;
 
     case COLLECTION_TABLE:
@@ -3232,10 +3279,10 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
           return newNode;
         }
       }
-      // Put the usingScope which can be a JoinScope
-      // or a SelectScope, in order to see the left items
-      // of the JOIN tree.
-      scopes.put(node, usingScope);
+      // The scope used to resolve the collection table's arguments must
+      // contain the items registered before it, but not the collection
+      // table's own namespace. parentScope provides exactly that.
+      scopes.put(node, parentScope);
       return newNode;
 
     case UNNEST:
